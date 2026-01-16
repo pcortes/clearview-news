@@ -7,7 +7,10 @@ const router = Router();
 
 const EvidenceRequestSchema = z.object({
   topic: z.string().min(1, 'Topic is required'),
-  claims: z.array(z.string()).min(1, 'At least one claim is required'),
+  // Core argument/position to find evidence for/against
+  coreArgument: z.string().optional(),
+  // Summary text (used to infer argument if coreArgument not provided)
+  summaryText: z.string().optional(),
 });
 
 router.post('/', validateRequest(EvidenceRequestSchema), getEvidence);

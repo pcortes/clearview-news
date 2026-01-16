@@ -140,6 +140,7 @@ export function App() {
       let buffer = '';
       let currentEvent = '';
       let streamedKeyFacts: string[] = [];
+      let streamedSummary = '';
 
       while (true) {
         const { done, value } = await reader.read();
@@ -176,6 +177,7 @@ export function App() {
                   break;
                 case 'summary':
                   setSummaryText(data.text);
+                  streamedSummary = data.text; // Track for evidence search
                   // Don't clear status - more content coming
                   break;
                 case 'keyFact':
@@ -208,7 +210,7 @@ export function App() {
                   // Load perspectives with political lean for smart prioritization
                   loadPerspectives(article, streamedKeyFacts, data.political_lean);
                   if (data.is_political) {
-                    loadEvidence(article, streamedKeyFacts);
+                    loadEvidence(article, streamedSummary);
                   }
                   break;
                 case 'error':
@@ -252,16 +254,18 @@ export function App() {
     }
   }
 
-  async function loadEvidence(article: any, facts: string[]) {
+  async function loadEvidence(article: any, summary: string) {
     setLoadingEvidence(true);
     try {
-      const topic = article.title;
-      const claims = facts.length > 0 ? facts.slice(0, 3) : [article.title];
-
+      // Pass the article title as topic and summary as core argument
+      // This lets the backend find expert research on the topic
       const response = await fetch(`${API_BASE_URL}/evidence`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ topic, claims }),
+        body: JSON.stringify({
+          topic: article.title,
+          summaryText: summary, // Used to infer the core argument/position
+        }),
       });
 
       if (response.ok) {

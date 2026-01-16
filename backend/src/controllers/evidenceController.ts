@@ -8,18 +8,41 @@ import crypto from 'crypto';
 // Cache TTL: 24 hours
 const CACHE_TTL = 24 * 3600;
 
-// Generate cache key from topic and claims
-function getCacheKey(topic: string, claims: string[]): string {
-  const hash = crypto.createHash('md5').update(`${topic}:${claims.join(',')}`).digest('hex');
+// Generate cache key
+function getCacheKey(topic: string, coreArgument: string): string {
+  const hash = crypto.createHash('md5').update(`${topic}:${coreArgument}`).digest('hex');
   return `evidence:${hash}`;
 }
 
+/**
+ * Build search queries to find research on BOTH sides of an argument
+ */
+function buildResearchQueries(topic: string, coreArgument: string): string[] {
+  // Extract key concepts from the argument
+  const queries = [
+    // Direct research on the topic
+    `${topic} research study evidence`,
+    `${topic} academic meta-analysis`,
+    // Look for supporting evidence
+    `${topic} benefits effectiveness study`,
+    // Look for opposing evidence
+    `${topic} problems risks criticism research`,
+    // Expert perspectives
+    `${topic} expert analysis policy`,
+  ];
+
+  return queries;
+}
+
 export async function getEvidence(req: Request, res: Response): Promise<void> {
-  const { topic, claims } = req.body;
+  const { topic, coreArgument, summaryText } = req.body;
+
+  // Use summaryText to infer core argument if not provided
+  const argument = coreArgument || summaryText || topic;
 
   try {
     // Check cache first
-    const cacheKey = getCacheKey(topic, claims);
+    const cacheKey = getCacheKey(topic, argument);
     const cached = await cache.get<any>(cacheKey);
 
     if (cached) {
@@ -28,65 +51,83 @@ export async function getEvidence(req: Request, res: Response): Promise<void> {
       return;
     }
 
-    console.log(`[Evidence] Researching evidence for: "${topic}"`);
+    console.log(`[Evidence] Researching expert evidence for: "${topic}"`);
+    console.log(`[Evidence] Core argument: "${argument.substring(0, 100)}..."`);
 
-    // Search for academic papers and expert commentary in parallel
+    // Build search queries for academic research
+    const queries = buildResearchQueries(topic, argument);
+
+    // Search for academic papers (research studies, meta-analyses)
+    const academicSearches = queries.slice(0, 3).map(q =>
+      searchAcademic(q, 5).catch(err => {
+        console.log(`[Evidence] Academic search failed for "${q}":`, err.message);
+        return { results: [] };
+      })
+    );
+
+    // Search for expert commentary (policy analysis, expert opinions)
+    const expertSearches = queries.slice(3).map(q =>
+      searchExpertCommentary(q, 4).catch(err => {
+        console.log(`[Evidence] Expert search failed for "${q}":`, err.message);
+        return { results: [] };
+      })
+    );
+
     const [academicResults, expertResults] = await Promise.all([
-      searchAcademic(topic, 8),
-      searchExpertCommentary(topic, 5),
+      Promise.all(academicSearches),
+      Promise.all(expertSearches),
     ]);
+
+    // Flatten and dedupe results
+    const allAcademic = academicResults.flatMap(r => r.results);
+    const allExpert = expertResults.flatMap(r => r.results);
+
+    // Remove duplicates by URL
+    const seenUrls = new Set<string>();
+    const dedupeAcademic = allAcademic.filter(r => {
+      if (seenUrls.has(r.url)) return false;
+      seenUrls.add(r.url);
+      return true;
+    }).slice(0, 10);
+
+    const dedupeExpert = allExpert.filter(r => {
+      if (seenUrls.has(r.url)) return false;
+      seenUrls.add(r.url);
+      return true;
+    }).slice(0, 6);
+
+    console.log(`[Evidence] Found ${dedupeAcademic.length} academic, ${dedupeExpert.length} expert sources`);
 
     // Combine Exa results for GPT synthesis
     const exaResults = {
-      academic: academicResults.results,
-      expert: expertResults.results,
+      academic: dedupeAcademic,
+      expert: dedupeExpert,
     };
 
-    // Use GPT to synthesize the evidence
-    const synthesis = await openaiService.synthesizeEvidence(topic, claims, exaResults);
+    // Use GPT to synthesize what experts/research say
+    const synthesis = await openaiService.synthesizeEvidence(topic, argument, exaResults);
 
-    // Verify DOIs for studies that have them
+    // Verify DOIs for key studies
     const studiesWithVerification = await Promise.all(
-      synthesis.studies.map(async (study) => {
+      (synthesis.keyStudies || []).map(async (study) => {
         if (study.doi) {
           const isValid = await verifyDOI(study.doi);
-          return {
-            ...study,
-            doiVerified: isValid,
-            verificationNote: isValid ? undefined : 'Could not verify citation - treat with caution',
-          };
+          return { ...study, doiVerified: isValid };
         }
-        return {
-          ...study,
-          doiVerified: false,
-          verificationNote: 'No DOI provided',
-        };
+        return { ...study, doiVerified: false };
       })
     );
 
     // Build response
     const response = {
       topic,
-      summary: synthesis.summary,
-      evidence_strength: synthesis.evidenceStrength,
-      studies: studiesWithVerification.map(study => ({
-        title: study.title,
-        authors: study.authors,
-        year: study.year,
-        journal: study.journal,
-        doi: study.doi,
-        doi_verified: study.doiVerified,
-        verification_note: study.verificationNote,
-        finding: study.finding,
-        url: study.url,
-      })),
-      expert_commentary: synthesis.expertCommentary.map(comment => ({
-        expert: comment.expert,
-        affiliation: comment.affiliation,
-        quote: comment.quote,
-        source_url: comment.sourceUrl,
-      })),
-      limitations: synthesis.limitations,
+      coreQuestion: synthesis.coreQuestion,
+      expertConsensus: synthesis.expertConsensus,
+      evidenceFor: synthesis.evidenceFor || [],
+      evidenceAgainst: synthesis.evidenceAgainst || [],
+      keyStudies: studiesWithVerification,
+      expertVoices: synthesis.expertVoices || [],
+      bottomLine: synthesis.bottomLine,
       cached: false,
     };
 

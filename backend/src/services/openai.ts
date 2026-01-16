@@ -360,23 +360,18 @@ For biasIndicators, quote the EXACT text from the article. Valid JSON only.`;
   }
 
   /**
-   * Synthesize evidence from Exa results
+   * Synthesize what EXPERTS and RESEARCH say about a topic
+   * Finds evidence FOR and AGAINST the article's position
    */
   async synthesizeEvidence(
     topic: string,
-    claims: string[],
+    coreArgument: string,
     exaResults: any
-  ): Promise<{
-    summary: string;
-    evidenceStrength: 'strong' | 'moderate' | 'limited' | 'contested';
-    studies: any[];
-    expertCommentary: any[];
-    limitations: string;
-  }> {
-    console.log(`[OpenAI] Synthesizing evidence for topic: "${topic}"`);
+  ): Promise<EvidenceSynthesisResponse> {
+    console.log(`[OpenAI] Synthesizing expert evidence for: "${topic}"`);
 
-    const systemPrompt = 'You are a research analyst synthesizing academic evidence. Always respond with valid JSON.';
-    const userPrompt = generateEvidenceSynthesisPrompt(topic, claims, exaResults);
+    const systemPrompt = 'You are a research analyst finding what EXPERTS and ACADEMIC RESEARCH say about a topic. Always respond with valid JSON.';
+    const userPrompt = generateEvidenceSynthesisPrompt(topic, coreArgument, exaResults);
 
     const { content: responseContent } = await this.makeResponsesRequest(
       systemPrompt,
@@ -386,35 +381,55 @@ For biasIndicators, quote the EXACT text from the article. Valid JSON only.`;
 
     const parsed = this.parseJsonResponse<EvidenceSynthesisResponse>(
       responseContent,
-      ['summary', 'evidenceStrength', 'studies', 'expertCommentary', 'limitations']
+      ['coreQuestion', 'expertConsensus', 'bottomLine']
     );
 
-    // Validate evidenceStrength
-    const validStrengths = ['strong', 'moderate', 'limited', 'contested'] as const;
-    const evidenceStrength = validStrengths.includes(parsed.evidenceStrength as any)
-      ? parsed.evidenceStrength
-      : 'limited';
-
+    // Return with defaults for missing fields
     return {
-      summary: parsed.summary || '',
-      evidenceStrength,
-      studies: (parsed.studies || []).map(study => ({
-        title: study.title || '',
-        authors: study.authors || [],
-        year: study.year || new Date().getFullYear(),
-        journal: study.journal,
-        doi: study.doi,
-        doiVerified: false, // Always false until verified externally
-        finding: study.finding || '',
-        url: study.url || '',
+      coreQuestion: parsed.coreQuestion || topic,
+      expertConsensus: parsed.expertConsensus || {
+        level: 'limited_research',
+        direction: 'inconclusive',
+        summary: 'Limited research found on this topic.',
+      },
+      evidenceFor: (parsed.evidenceFor || []).map(e => ({
+        finding: e.finding || '',
+        source: e.source || '',
+        sourceType: e.sourceType || 'expert_opinion',
+        year: e.year || new Date().getFullYear(),
+        url: e.url || '',
+        strength: e.strength || 'moderate',
       })),
-      expertCommentary: (parsed.expertCommentary || []).map(comment => ({
-        expert: comment.expert || '',
-        affiliation: comment.affiliation || '',
-        quote: comment.quote || '',
-        sourceUrl: comment.sourceUrl || '',
+      evidenceAgainst: (parsed.evidenceAgainst || []).map(e => ({
+        finding: e.finding || '',
+        source: e.source || '',
+        sourceType: e.sourceType || 'expert_opinion',
+        year: e.year || new Date().getFullYear(),
+        url: e.url || '',
+        strength: e.strength || 'moderate',
       })),
-      limitations: parsed.limitations || 'Evidence limitations not assessed.',
+      keyStudies: (parsed.keyStudies || []).map(s => ({
+        title: s.title || '',
+        authors: s.authors || '',
+        year: s.year || new Date().getFullYear(),
+        journal: s.journal || '',
+        doi: s.doi,
+        keyFinding: s.keyFinding || '',
+        citationCount: s.citationCount || 'unknown',
+        url: s.url || '',
+      })),
+      expertVoices: (parsed.expertVoices || []).map(e => ({
+        name: e.name || '',
+        credentials: e.credentials || '',
+        position: e.position || 'nuanced',
+        quote: e.quote || '',
+        url: e.url || '',
+      })),
+      bottomLine: parsed.bottomLine || {
+        whatResearchShows: 'Research on this topic is limited or mixed.',
+        confidence: 'low',
+        caveat: 'More research may be needed.',
+      },
     };
   }
 
