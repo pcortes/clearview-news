@@ -8,6 +8,7 @@ import analyzeRoutes from './analyze';
 import analyzeStreamRoutes from './analyzeStream';
 import perspectivesRoutes from './perspectives';
 import evidenceRoutes from './evidence';
+import evaluateRoutes from './evaluate';
 
 const router = Router();
 
@@ -156,6 +157,7 @@ apiV1Router.use('/analyze', analyzeRoutes);
 apiV1Router.use('/analyze', analyzeStreamRoutes);  // Adds /analyze/stream
 apiV1Router.use('/perspectives', perspectivesRoutes);
 apiV1Router.use('/evidence', evidenceRoutes);
+apiV1Router.use('/evaluate', evaluateRoutes);  // Wave 7: Full pipeline evaluation
 
 // API index endpoint
 apiV1Router.get('/', (_req: Request, res: Response) => {
@@ -170,6 +172,10 @@ apiV1Router.get('/', (_req: Request, res: Response) => {
       'POST /api/v1/analyze',
       'POST /api/v1/perspectives',
       'POST /api/v1/evidence',
+      'POST /api/v1/evaluate',
+      'POST /api/v1/evaluate/quick',
+      'POST /api/v1/evaluate/claim',
+      'GET /api/v1/evaluate/health',
     ],
   });
 });

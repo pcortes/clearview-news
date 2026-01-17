@@ -1,3 +1,15 @@
+// Wave 1-3: Claims, Domain, Evidence
+export * from './claims';
+
+// Wave 4: Expert Validation
+export * from './expert';
+
+// Wave 5: Consensus Detection
+export * from './consensus';
+
+// Wave 6: Output Generation
+export * from './output';
+
 // Core data models
 export interface ArticleAnalysis {
   id: string;
