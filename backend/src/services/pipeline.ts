@@ -344,26 +344,59 @@ function extractExpertMentions(claim: ClassifiedClaim): PersonMention[] {
 // ═══════════════════════════════════════════════════════════════
 
 /**
- * Evaluate a single claim through the full pipeline
+ * Gather evidence for all claims in parallel (kick off early for performance)
  */
-async function evaluateSingleClaim(
-  claim: ClassifiedClaim,
-  articleSubjects: string[],
+async function gatherAllEvidence(
+  claims: ClassifiedClaim[],
   options: Required<PipelineOptions>
-): Promise<EvaluatedClaim> {
-  // Step 1: Gather evidence (Wave 2 + 3)
-  let evidence: DirectedEvidence[];
+): Promise<Map<string, DirectedEvidence[]>> {
+  const evidenceMap = new Map<string, DirectedEvidence[]>();
+
   if (options.skipEvidenceSearch || !isExaConfigured()) {
-    evidence = createMockEvidence(claim);
-  } else {
-    evidence = await gatherEvidence(claim, options.maxSearchResults);
+    // Use mock evidence
+    for (const claim of claims) {
+      evidenceMap.set(claim.id, createMockEvidence(claim));
+    }
+    return evidenceMap;
   }
 
-  // Step 2: Extract and validate experts (Wave 4)
+  console.log(`[Pipeline] Gathering evidence for ${claims.length} claims in parallel...`);
+
+  // Kick off ALL evidence searches in parallel
+  const evidencePromises = claims.map(async (claim) => {
+    try {
+      const evidence = await gatherEvidence(claim, options.maxSearchResults);
+      return { claimId: claim.id, evidence };
+    } catch (error) {
+      console.warn(`[Pipeline] Evidence search failed for claim ${claim.id}:`, (error as Error).message);
+      return { claimId: claim.id, evidence: createMockEvidence(claim) };
+    }
+  });
+
+  const results = await Promise.all(evidencePromises);
+
+  for (const { claimId, evidence } of results) {
+    evidenceMap.set(claimId, evidence);
+  }
+
+  console.log(`[Pipeline] Evidence gathered for all ${claims.length} claims`);
+  return evidenceMap;
+}
+
+/**
+ * Evaluate a single claim with pre-fetched evidence
+ */
+function evaluateSingleClaimWithEvidence(
+  claim: ClassifiedClaim,
+  evidence: DirectedEvidence[],
+  articleSubjects: string[],
+  options: Required<PipelineOptions>
+): EvaluatedClaim {
+  // Step 1: Extract and validate experts (Wave 4)
   const expertMentions = extractExpertMentions(claim);
   const experts = validateExperts(expertMentions, articleSubjects, claim.domain);
 
-  // Step 3: Assess consensus (Wave 5)
+  // Step 2: Assess consensus (Wave 5)
   const consensusInput: ConsensusAssessmentInput = {
     claimText: claim.text,
     claimType: claim.type,
@@ -373,13 +406,13 @@ async function evaluateSingleClaim(
   };
   const consensus = assessConsensus(consensusInput);
 
-  // Step 4: Generate output (Wave 6)
+  // Step 3: Generate output (Wave 6)
   const output = generateOutput(consensus, claim.text, {
     format: options.outputFormat,
     includeMetadata: true,
   });
 
-  // Step 5: Perform honesty check
+  // Step 4: Perform honesty check
   const honestyCheck = performHonestyCheck(consensus, output.rendered);
 
   return {
@@ -390,6 +423,25 @@ async function evaluateSingleClaim(
     output,
     honestyCheck,
   };
+}
+
+/**
+ * Legacy: Evaluate a single claim through the full pipeline (fetches its own evidence)
+ */
+async function evaluateSingleClaim(
+  claim: ClassifiedClaim,
+  articleSubjects: string[],
+  options: Required<PipelineOptions>
+): Promise<EvaluatedClaim> {
+  // Gather evidence for this claim
+  let evidence: DirectedEvidence[];
+  if (options.skipEvidenceSearch || !isExaConfigured()) {
+    evidence = createMockEvidence(claim);
+  } else {
+    evidence = await gatherEvidence(claim, options.maxSearchResults);
+  }
+
+  return evaluateSingleClaimWithEvidence(claim, evidence, articleSubjects, options);
 }
 
 /**
@@ -502,11 +554,22 @@ export async function runPipeline(input: PipelineInput): Promise<PipelineResult>
     warnings.push(`Evaluating only first ${options.maxClaims} of ${extractedClaims.claims.length} claims`);
   }
 
-  // Step 2-6: Evaluate each claim
+  // ═══════════════════════════════════════════════════════════════
+  // Step 2: IMMEDIATELY gather evidence for ALL claims in parallel
+  // This is the slowest step - kick it off right after claim extraction
+  // ═══════════════════════════════════════════════════════════════
   servicesUsed.push('domainRouter', 'evidenceTier', 'expertValidator', 'consensusDetector', 'outputGenerator');
   if (isExaConfigured() && !options.skipEvidenceSearch) {
     servicesUsed.push('exa');
   }
+
+  console.log('[Pipeline] Step 2: Gathering evidence for all claims (parallel)...');
+  const evidenceMap = await gatherAllEvidence(claimsToEvaluate, options);
+
+  // ═══════════════════════════════════════════════════════════════
+  // Step 3-6: Process claims with pre-fetched evidence (fast, local)
+  // ═══════════════════════════════════════════════════════════════
+  console.log('[Pipeline] Step 3: Processing claims with evidence...');
 
   const evaluatedClaims: EvaluatedClaim[] = [];
   const rawSearchQueries: Record<string, string[]> = {};
@@ -519,61 +582,25 @@ export async function runPipeline(input: PipelineInput): Promise<PipelineResult>
     }
   }
 
-  // Evaluate claims - parallel or sequential based on options
-  if (options.parallelEvaluation && claimsToEvaluate.length > 1) {
-    console.log(`[Pipeline] Evaluating ${claimsToEvaluate.length} claims in parallel (max ${options.maxConcurrency} concurrent)...`);
+  // Process claims with pre-fetched evidence (this is now fast - no API calls)
+  for (const claim of claimsToEvaluate) {
+    try {
+      const evidence = evidenceMap.get(claim.id) || createMockEvidence(claim);
+      const evaluated = evaluateSingleClaimWithEvidence(
+        claim,
+        evidence,
+        extractedClaims.articleSubjects,
+        options
+      );
+      evaluatedClaims.push(evaluated);
 
-    // Process in batches to respect concurrency limit
-    const batches: ClassifiedClaim[][] = [];
-    for (let i = 0; i < claimsToEvaluate.length; i += options.maxConcurrency) {
-      batches.push(claimsToEvaluate.slice(i, i + options.maxConcurrency));
-    }
-
-    for (const batch of batches) {
-      const batchPromises = batch.map(async (claim) => {
-        try {
-          console.log(`[Pipeline] Evaluating: "${claim.text.substring(0, 40)}..."`);
-          return await evaluateSingleClaim(claim, extractedClaims.articleSubjects, options);
-        } catch (error) {
-          const errorMsg = `Claim "${claim.id}" evaluation failed: ${(error as Error).message}`;
-          console.error(`[Pipeline] ${errorMsg}`);
-          errors.push(errorMsg);
-          return null;
-        }
-      });
-
-      const batchResults = await Promise.all(batchPromises);
-      for (const result of batchResults) {
-        if (result) {
-          evaluatedClaims.push(result);
-          if (!result.honestyCheck.isHonest) {
-            warnings.push(`Claim "${result.claim.id}" has honesty violations: ${result.honestyCheck.violations.join('; ')}`);
-          }
-        }
+      if (!evaluated.honestyCheck.isHonest) {
+        warnings.push(`Claim "${claim.id}" has honesty violations: ${evaluated.honestyCheck.violations.join('; ')}`);
       }
-    }
-  } else {
-    // Sequential evaluation
-    for (let i = 0; i < claimsToEvaluate.length; i++) {
-      const claim = claimsToEvaluate[i];
-      console.log(`[Pipeline] Evaluating claim ${i + 1}/${claimsToEvaluate.length}: "${claim.text.substring(0, 50)}..."`);
-
-      try {
-        const evaluated = await evaluateSingleClaim(
-          claim,
-          extractedClaims.articleSubjects,
-          options
-        );
-        evaluatedClaims.push(evaluated);
-
-        if (!evaluated.honestyCheck.isHonest) {
-          warnings.push(`Claim "${claim.id}" has honesty violations: ${evaluated.honestyCheck.violations.join('; ')}`);
-        }
-      } catch (error) {
-        const errorMsg = `Claim "${claim.id}" evaluation failed: ${(error as Error).message}`;
-        console.error(`[Pipeline] ${errorMsg}`);
-        errors.push(errorMsg);
-      }
+    } catch (error) {
+      const errorMsg = `Claim "${claim.id}" evaluation failed: ${(error as Error).message}`;
+      console.error(`[Pipeline] ${errorMsg}`);
+      errors.push(errorMsg);
     }
   }
 
